@@ -196,7 +196,11 @@
             "Recommended Next Step": "={{ $json.qualification.recommended_next_step }}",
             "Personalized Opening Line": "={{ $json.qualification.personalized_opening_line }}",
             "Summary": "={{ $json.qualification.summary }}",
-            "Confidence Note": "={{ $json.qualification.confidence_note }}"
+            "Confidence Note": "={{ $json.qualification.confidence_note }}",
+            "Need Clarity Score": "={{ $json.qualification.components.need_clarity_score }}",
+            "Role Fit Score": "={{ $json.qualification.components.role_fit_score }}",
+            "Buying Intent Score": "={{ $json.qualification.components.buying_intent_score }}",
+            "Budget Timing Score": "={{ $json.qualification.components.budget_timing_score }}"
           },
           "matchingColumns": []
         },
