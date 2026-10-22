@@ -1,0 +1,445 @@
+{
+  "name": "AI Lead Qualifier | Sheets + HubSpot + Slack + Email",
+  "nodes": [
+    {
+      "id": "ai-lead-001",
+      "name": "Lead Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-lead-qualifier",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "f3b0b2bf-cf6c-46d9-980c-b1f94a064201"
+    },
+    {
+      "id": "ai-lead-002",
+      "name": "Normalize and Validate Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const incoming = $input.first().json;\nconst body = incoming.body && typeof incoming.body === 'object' ? incoming.body : incoming;\nconst clean = v => typeof v === 'string' ? v.trim() : '';\nconst lead = {\n  name: clean(body.name), email: clean(body.email).toLowerCase(),\n  company: clean(body.company), website: clean(body.website),\n  role: clean(body.role), need: clean(body.need), budget: clean(body.budget),\n  source: clean(body.source) || 'webhook'\n};\nconst errors = [];\nfor (const k of ['name','email','company','need']) if (!lead[k]) errors.push(k + ' is required');\nif (lead.email && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(lead.email)) errors.push('email must be a valid email address');\nif (lead.website) {\n  try {\n    const u = new URL(lead.website.startsWith('http') ? lead.website : 'https://' + lead.website);\n    if (!['http:','https:'].includes(u.protocol)) errors.push('website must use HTTP or HTTPS');\n    lead.website = u.href;\n  } catch { errors.push('website must be a valid URL'); }\n}\nreturn [{json:{...lead,isValid:errors.length===0,validationError:errors.join('; '),receivedAt:new Date().toISOString()}}];"
+      }
+    },
+    {
+      "id": "ai-lead-003",
+      "name": "Is Lead Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "lead-valid-condition",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ai-lead-004",
+      "name": "Score Lead with OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_OPENAI_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'gpt-4.1-mini', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are an evidence-conscious B2B lead qualification assistant. Use only facts in supplied fields; do not browse or invent facts. Score from 0 to 100 based on clarity of need, relevance of role, and budget/timing information. Missing details are uncertainty, not a negative personal attribute. Return only JSON with keys lead_score (integer 0-100), qualification (high|medium|low), fit_reasons (array), risks (array), recommended_next_step, personalized_opening_line, summary, confidence_note. High=75-100, medium=45-74, low=0-44.' }, { role: 'user', content: 'Qualify this B2B lead: ' + JSON.stringify($node['Normalize and Validate Lead'].json) } ] } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Configure n8n Header Auth credential. Keep real API keys out of workflow exports."
+    },
+    {
+      "id": "ai-lead-005",
+      "name": "Parse Qualification Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst text = response.choices?.[0]?.message?.content;\nif (typeof text !== 'string' || !text.trim()) throw new Error('OpenAI returned no message content; check credentials and model access.');\nlet ai;\ntry { ai = JSON.parse(text); } catch { throw new Error('OpenAI response was not valid JSON.'); }\nconst l = $node['Normalize and Validate Lead'].json;\nconst n = Number(ai.lead_score);\nif (!Number.isFinite(n)) throw new Error('AI response is missing numeric lead_score.');\nconst score = Math.max(0,Math.min(100,Math.round(n)));\nconst qualification = ['high','medium','low'].includes(String(ai.qualification).toLowerCase()) ? String(ai.qualification).toLowerCase() : (score>=75?'high':score>=45?'medium':'low');\nconst arr = v => Array.isArray(v) ? v.map(String).slice(0,4) : [];\nreturn [{json:{success:true,lead:{name:l.name,email:l.email,company:l.company,website:l.website,role:l.role,need:l.need,budget:l.budget,source:l.source},qualification:{lead_score:score,qualification,fit_reasons:arr(ai.fit_reasons),risks:arr(ai.risks),recommended_next_step:String(ai.recommended_next_step||''),personalized_opening_line:String(ai.personalized_opening_line||''),summary:String(ai.summary||''),confidence_note:String(ai.confidence_note||'')},receivedAt:l.receivedAt,processedAt:new Date().toISOString()}}];"
+      }
+    },
+    {
+      "id": "ai-lead-006",
+      "name": "Return Qualification Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1440,
+        220
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: $json.success, lead: $json.lead, qualification: $json.qualification, receivedAt: $json.receivedAt, processedAt: $json.processedAt } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "ai-lead-007",
+      "name": "Return Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        960,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, error: $json.validationError, receivedAt: $json.receivedAt } }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "ai-lead-008",
+      "name": "Save Lead to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1710,
+        390
+      ],
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Received At": "={{ $json.receivedAt }}",
+            "Processed At": "={{ $json.processedAt }}",
+            "Name": "={{ $json.lead.name }}",
+            "Email": "={{ $json.lead.email }}",
+            "Company": "={{ $json.lead.company }}",
+            "Website": "={{ $json.lead.website }}",
+            "Role": "={{ $json.lead.role }}",
+            "Need": "={{ $json.lead.need }}",
+            "Budget": "={{ $json.lead.budget }}",
+            "Source": "={{ $json.lead.source }}",
+            "Lead Score": "={{ $json.qualification.lead_score }}",
+            "Qualification": "={{ $json.qualification.qualification }}",
+            "Fit Reasons": "={{ JSON.stringify($json.qualification.fit_reasons) }}",
+            "Risks": "={{ JSON.stringify($json.qualification.risks) }}",
+            "Recommended Next Step": "={{ $json.qualification.recommended_next_step }}",
+            "Personalized Opening Line": "={{ $json.qualification.personalized_opening_line }}",
+            "Summary": "={{ $json.qualification.summary }}",
+            "Confidence Note": "={{ $json.qualification.confidence_note }}"
+          },
+          "matchingColumns": []
+        },
+        "options": {
+          "valueInputMode": "RAW"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Connect Google Sheets OAuth2, replace spreadsheet ID, and create a Leads tab using leads_sheet_template.csv."
+    },
+    {
+      "id": "ai-lead-009",
+      "name": "Upsert Contact in HubSpot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1710,
+        570
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { inputs: [{ id: $json.lead.email, idProperty: 'email', properties: { email: $json.lead.email, firstname: ($json.lead.name || '').trim().split(/\\s+/).slice(0,1).join(' '), lastname: ($json.lead.name || '').trim().split(/\\s+/).slice(1).join(' '), company: $json.lead.company, jobtitle: $json.lead.role, website: $json.lead.website, lead_score: String($json.qualification.lead_score), lead_qualification: $json.qualification.qualification, lead_need: $json.lead.need, lead_source: $json.lead.source, ai_summary: $json.qualification.summary } }] } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Select a Bearer Auth credential for your HubSpot private app. Create custom properties lead_score, lead_qualification, lead_need, lead_source, ai_summary."
+    },
+    {
+      "id": "ai-lead-010",
+      "name": "Score at Least 75?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1710,
+        760
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "high-priority-score-condition",
+              "leftValue": "={{ $json.qualification.lead_score }}",
+              "rightValue": 75,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notesInFlow": true,
+      "notes": "Only scores >= 75 trigger notifications."
+    },
+    {
+      "id": "ai-lead-011",
+      "name": "Notify Slack - High Priority",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.5,
+      "position": [
+        1980,
+        680
+      ],
+      "parameters": {
+        "select": "channel",
+        "resource": "message",
+        "operation": "post",
+        "channelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "text": "={{ 'HIGH-PRIORITY LEAD (' + $json.qualification.lead_score + '/100)\\nCompany: ' + $json.lead.company + '\\nContact: ' + $json.lead.name + ' (' + $json.lead.email + ')\\nQualification: ' + $json.qualification.qualification + '\\nNeed: ' + $json.lead.need + '\\nRecommended next step: ' + $json.qualification.recommended_next_step }}",
+        "messageType": "text",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Select Slack API credential and destination channel."
+    },
+    {
+      "id": "ai-lead-012",
+      "name": "Send Email - High Priority",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1980,
+        850
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "subject": "={{ '[High-priority lead] ' + $json.lead.company + ' - score ' + $json.qualification.lead_score }}",
+        "emailType": "text",
+        "message": "={{ 'A new high-priority B2B lead has been qualified.\\n\\nCompany: ' + $json.lead.company + '\\nContact: ' + $json.lead.name + '\\nEmail: ' + $json.lead.email + '\\nRole: ' + $json.lead.role + '\\nLead score: ' + $json.qualification.lead_score + '/100\\nQualification: ' + $json.qualification.qualification + '\\n\\nNeed: ' + $json.lead.need + '\\n\\nSummary: ' + $json.qualification.summary + '\\n\\nRecommended next step: ' + $json.qualification.recommended_next_step + '\\n\\nSource: ' + $json.lead.source }}",
+        "options": {
+          "sendTo": "YOUR_TEAM_EMAIL@example.com"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Connect Gmail OAuth2 and replace the internal team destination email."
+    },
+    {
+      "id": "ai-lead-013",
+      "name": "Integration Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1290,
+        -100
+      ],
+      "parameters": {
+        "content": "## Integrated AI Lead Qualifier\n\n1. Validate lead input\n2. Score with OpenAI\n3. Return JSON response\n4. Append valid leads to Google Sheets\n5. Upsert HubSpot contact by email\n6. Notify Slack + internal email only for scores >= 75\n\nConfigure credentials, spreadsheet ID and headers, HubSpot custom properties, Slack channel, and email recipient before production.",
+        "height": 280,
+        "width": 420,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Lead Intake Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize and Validate Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize and Validate Lead": {
+      "main": [
+        [
+          {
+            "node": "Is Lead Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Lead Valid?": {
+      "main": [
+        [
+          {
+            "node": "Score Lead with OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Lead with OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Parse Qualification Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Qualification Result": {
+      "main": [
+        [
+          {
+            "node": "Return Qualification Result",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Lead to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Upsert Contact in HubSpot",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Score at Least 75?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score at Least 75?": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - High Priority",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Email - High Priority",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "6a038f9a-5e3a-46cc-bafb-9c9a0d0f0010",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
